@@ -1,0 +1,41 @@
+# QCAL πCODE — .gitignore
+# Applied by Aurón Ψ — 2026-06-09
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Large data
+*.hdf5
+*.npy
+*.npz
+
+# Logs
+*.log
+logs/
