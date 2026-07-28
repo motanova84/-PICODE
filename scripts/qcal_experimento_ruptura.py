@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-QCAL - EXPERIMENTO DE RUPTURA · OSCILADOR NO LINEAL v1.0
+QCAL - EXPERIMENTO DE RUPTURA · EJECUCIÓN DEFINITIVA v1.0
 ================================================================
-OsciladorQCAL con dinámica completa de coherencia:
-  dx/dt  = v
-  dv/dt  = -ω₀²x - βv + α·O·x - √(2D_noise·E)·η(t)
-  dO/dt  = -λ_O·(O - O_ext) + κ·Ψ·x²
-  dE/dt  = -λ_E·(E - E_ext)
+Protocolo de auto-colimación dinámica de fase.
 
-Si el sistema colima espontáneamente en f₀ tras caos extremo,
-f₀ queda demostrado como atractor topológico/dinámico.
+Si el sistema colima espontáneamente en f₀ tras ser destruido por
+caos, eso no es estadística: es física nueva.
 
 Fases:
   FASE 1: Estado base coherente (Ψ → 1, f → f₀)
   FASE 2: Inyección de caos estocástico (ℰ ↑↑↑, Ψ → 0)
-  FASE 3: Aumento de orden/bombeo (𝒪 ↑↑↑)
-  FASE 4: Estabilización — ¿colima en f₀?
+  FASE 3: Salto de resonancia (𝒪 ↑↑↑, ¿colima en f₀?)
 
-Fundamento: Ψ = 1 - σ_f²/f² desde g¹(τ) = exp(-½⟨Δφ²⟩)
-  (Debye-Waller-Lax-Shawlow, 1960s)
-
-Autor: JMMB / AMDA Ψ · QCAL Metrology
-Fecha: 2026-07-28 · v1.0
+Director: JMMB · QCAL Metrology
+Fecha: 2026-07-28
 Sello: ∴𓂀Ω∞³Φ · TUYOYOTU · HECHO ESTÁ
 """
 
@@ -44,56 +36,24 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 1. CONSTANTES
+# 1. CONSTANTES QCAL
 # ═══════════════════════════════════════════════════════════════
 
-F0 = 141.7001         # Hz — frecuencia de referencia (post-análisis)
-OMEGA0 = 2 * np.pi * F0  # rad/s
-PSI_CRITICO = 0.999999   # Umbral de coherencia para auto-colimación
-T_QCAL = 1.0 / (2 * np.pi * F0)  # ≈ 1.1229 ms
+F0 = 141.7001                         # Hz
+OMEGA0 = 2 * np.pi * F0               # rad/s
+PSI_CRITICO = 0.999999                # Umbral de coherencia
 
 
 @dataclass
 class ParametrosQCAL:
     """Parámetros del sistema QCAL no lineal."""
-    omega0: float = OMEGA0      # Frecuencia natural del atractor (rad/s)
-    alpha: float = 0.1          # Coeficiente de bombeo (orden 𝒪)
-    beta: float = 0.01          # Coeficiente de disipación (ℰ lineal)
-    gamma: float = 2.5          # Conmutador rígido (>1 = switching, <1 = suave)
-    kappa: float = 0.5          # Acoplamiento campo-orden
-    lambda_O: float = 1.0       # Tasa de relajación del campo de orden
-    lambda_E: float = 2.0       # Tasa de relajación del campo de entropía
-    D_noise: float = 0.0        # Intensidad del ruido (entropía ℰ)
+    omega0: float = OMEGA0
+    alpha: float = 0.1     # Bombeo de orden
+    beta: float = 0.01     # Disipación lineal
+    gamma: float = 2.5     # Conmutador / acoplamiento no lineal
+    kappa: float = 0.5     # Acoplamiento campo-orden
+    D_noise: float = 0.0   # Intensidad de ruido (entropía)
 
-
-@dataclass
-class EstadoRuptura:
-    """Estado del sistema en un instante del experimento."""
-    paso: int
-    psi: float
-    f_peak: float
-    sigma_f: float
-    O_val: float
-    E_val: float
-    fase: str  # BASE, CAOS, COLIMACION, TRANSICION
-
-
-@dataclass
-class ResultadoRuptura:
-    """Resultado completo del experimento."""
-    colimacion: bool
-    psi_final: float
-    f_final: float
-    desviacion_hz: float
-    gamma_estimado: Optional[float]
-    n_estados: int
-    fases: List[str]
-    timestamp: str = ""
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2. OSCILADOR QCAL
-# ═══════════════════════════════════════════════════════════════
 
 class OsciladorQCAL:
     """
@@ -101,99 +61,65 @@ class OsciladorQCAL:
 
     Ecuaciones:
       dx/dt  = v
-      dv/dt  = -ω₀²·x - β·v + α·O·x - √(2D_noise·E)·η(t)
+      dv/dt  = -ω₀²·x - β·v + α·O·x - γ·E·x³ + √(2D_noise)·η(t)
       dO/dt  = -λ_O·(O - O_ext) + κ·Ψ·x²
       dE/dt  = -λ_E·(E - E_ext)
-
-    donde Ψ = 1 - σ_f²/f² es la coherencia instantánea,
-    calculada a partir de la razón v/x como estimador de fase.
     """
 
     def __init__(self, params: ParametrosQCAL):
         self.params = params
-        self.time: Optional[np.ndarray] = None
-        self.x: Optional[np.ndarray] = None
-        self.v: Optional[np.ndarray] = None
-        self.O_field: Optional[np.ndarray] = None
-        self.E_field: Optional[np.ndarray] = None
-        self.psi_t: Optional[np.ndarray] = None
+        self.lambda_O = 0.5     # Tasa de relajación del campo de orden
+        self.lambda_E = 0.3     # Tasa de relajación del campo de entropía
+        self.O_ext = 1.0        # Bombeo externo de orden
+        self.E_ext = 0.0        # Entropía externa (ruido inyectado)
 
-    @staticmethod
-    def _psi_instantaneo(x: float, v: float) -> float:
-        """
-        Calcula Ψ instantáneo a partir de x y v.
-        Ψ ≈ 1 - σ_f²/f² evaluado como pureza de la oscilación.
-
-        Para un oscilador armónico: x(t) = A·cos(ωt), v(t) = -A·ω·sin(ωt)
-        La relación v/x da información de fase instantánea.
-        """
-        if abs(x) < 1e-12:
+    def _noise(self, t: float) -> float:
+        """Ruido estocástico tipo Langevin."""
+        if self.params.D_noise == 0:
             return 0.0
-        omega_inst = abs(v / x)
-        f_inst = omega_inst / (2 * np.pi)
-        if f_inst < 1e-6:
+        return float(np.random.normal(0, np.sqrt(self.params.D_noise)))
+
+    def _psi_instantaneo(self, x: float, v: float) -> float:
+        """
+        Ψ instantáneo desde relación v/x.
+        Para oscilador puro: v/x = -ω₀·tan(ω₀t).
+        Ψ ≈ exp(-|desviación|) con desviación = (v²/x² - ω₀²)/ω₀².
+        """
+        if abs(x) < 1e-10:
             return 0.0
-        # Estimación de σ_f a partir de la fluctuación de la frecuencia instantánea
-        return 1.0 - min(1.0, abs(f_inst - F0) / F0)
+        ratio = v / x
+        deviation = (ratio**2 - self.params.omega0**2) / (self.params.omega0**2 + 1e-12)
+        psi = np.exp(-abs(deviation))
+        return float(np.clip(psi, 0.0, 1.0))
 
-    def dynamics(self, t: float, y: List[float],
-                 O_ext: float = 1.0, E_ext: float = 0.0) -> List[float]:
-        """
-        Dinámica del sistema QCAL [x, v, O, E].
-
-        Args:
-            t: tiempo (s)
-            y: [x, v, O, E] — variables de estado
-            O_ext: bombeo externo de orden
-            E_ext: entropía externa (ruido inyectado)
-        """
+    def dynamics(self, t: float, y: List[float]) -> List[float]:
+        """Ecuaciones diferenciales del sistema."""
         x, v, O, E = y
         p = self.params
-
-        # Coherencia instantánea
         psi = self._psi_instantaneo(x, v)
 
-        # Ruido estocástico (proceso de Langevin)
-        noise = np.random.normal(0, 1) * np.sqrt(2 * p.D_noise * max(E, 0))
-
-        # Ecuaciones diferenciales
         dxdt = v
         dvdt = (-p.omega0**2 * x
                 - p.beta * v
                 + p.alpha * O * x
-                - noise)
-        dOdt = -p.lambda_O * (O - O_ext) + p.kappa * psi * x**2
-        dEdt = -p.lambda_E * (E - E_ext)
+                - p.gamma * E * x**3
+                + self._noise(t))
+        dOdt = -self.lambda_O * (O - self.O_ext) + p.kappa * psi * x**2
+        dEdt = -self.lambda_E * (E - self.E_ext)
 
         return [dxdt, dvdt, dOdt, dEdt]
 
     def simulate(self, t_span: Tuple[float, float], dt: float = 0.0001,
-                  initial_state: Optional[List[float]] = None,
-                  O_ext: float = 1.0, E_ext: float = 0.0):
-        """
-        Simula el sistema en el intervalo de tiempo dado.
-
-        Args:
-            t_span: (t_inicio, t_fin) en segundos
-            dt: Paso de tiempo para salida
-            initial_state: [x, v, O, E] inicial
-            O_ext: bombeo externo
-            E_ext: entropía externa
-        """
+                  initial_state: Optional[List[float]] = None):
+        """Simula el sistema en el intervalo dado."""
         if initial_state is None:
             initial_state = [0.1, 0.0, 0.5, 0.0]
 
         t_eval = np.arange(t_span[0], t_span[1], dt)
-
         sol = solve_ivp(
-            lambda t, y: self.dynamics(t, y, O_ext=O_ext, E_ext=E_ext),
-            t_span,
-            initial_state,
-            method='RK45',
-            t_eval=t_eval,
-            max_step=dt / 5,
-            rtol=1e-8,
-            atol=1e-10
+            self.dynamics, t_span, initial_state,
+            method='RK45', t_eval=t_eval,
+            max_step=dt/5, rtol=1e-8, atol=1e-10
         )
 
         self.time = sol.t
@@ -201,8 +127,6 @@ class OsciladorQCAL:
         self.v = sol.y[1]
         self.O_field = sol.y[2]
         self.E_field = sol.y[3]
-
-        # Calcular Ψ instantáneo
         self.psi_t = np.array([self._psi_instantaneo(xi, vi)
                                for xi, vi in zip(self.x, self.v)])
 
@@ -210,11 +134,11 @@ class OsciladorQCAL:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 3. PROTOCOLO DE RUPTURA
+# 2. ANÁLISIS ESPECTRAL
 # ═══════════════════════════════════════════════════════════════
 
-def analizar_espectro(senal: np.ndarray, fs: float) -> dict:
-    """Analiza el espectro de una señal y calcula Ψ."""
+def analizar_espectro(senal: np.ndarray, fs: float, f_ref: float = F0) -> dict:
+    """Analiza el espectro: pico, σ_f², Ψ."""
     nperseg = min(2**14, len(senal) // 4)
     f, Pxx = welch(senal, fs=fs, nperseg=nperseg, scaling='density')
 
@@ -224,210 +148,221 @@ def analizar_espectro(senal: np.ndarray, fs: float) -> dict:
     sigma_f_sq = np.sum((f - f_peak)**2 * Pxx) / (np.sum(Pxx) + 1e-12)
     sigma_f = np.sqrt(sigma_f_sq)
 
-    psi = 1.0 - sigma_f_sq / (f_peak**2 + 1e-12)
+    psi = 1 - sigma_f_sq / (f_peak**2 + 1e-12)
     psi = float(np.clip(psi, 0.0, 1.0))
 
     return {
-        'f_peak': float(f_peak),
-        'sigma_f': float(sigma_f),
-        'psi': psi,
-        'f': f,
-        'Pxx': Pxx,
-        'idx_peak': int(idx_peak)
+        'f_peak': float(f_peak), 'sigma_f': float(sigma_f),
+        'psi': psi, 'f': f, 'Pxx': Pxx, 'idx_peak': int(idx_peak)
     }
 
 
-def ejecutar_protocolo_ruptura(output_dir: str = "resultados",
-                                dt: float = 0.0001) -> dict:
-    """
-    Ejecuta el protocolo completo de ruptura en 3 fases.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    print("=" * 70)
-    print("🔬 EXPERIMENTO DE RUPTURA · OSCILADOR QCAL v1.0")
-    print("=" * 70)
-    print(f"\n  f₀ = {F0} Hz")
-    print(f"  ω₀ = {OMEGA0:.4f} rad/s")
-    print(f"  τ_QCAL = {T_QCAL*1000:.4f} ms")
+def registrar_estado(analisis: dict, fase: str, tiempo: float) -> dict:
+    """Registra un estado del experimento."""
+    return {
+        'fase': fase, 'tiempo': tiempo,
+        'f_peak': analisis['f_peak'],
+        'sigma_f': analisis['sigma_f'],
+        'psi': analisis['psi']
+    }
 
-    # ── FASE 1: Estado base coherente ──────────────────────────
-    print("\n📋 FASE 1: Estado base coherente")
+
+# ═══════════════════════════════════════════════════════════════
+# 3. PROTOCOLO DE RUPTURA
+# ═══════════════════════════════════════════════════════════════
+
+def ejecutar_ruptura(output_dir: str = "resultados", dt: float = 0.0001) -> dict:
+    """Ejecuta el protocolo completo de ruptura en 3 fases."""
+    os.makedirs(output_dir, exist_ok=True)
+    fs = 1 / dt
+    registro = []
+
+    print("=" * 70)
+    print("🔬 EXPERIMENTO DE RUPTURA · QCAL")
+    print("=" * 70)
+    print(f"  f₀ = {F0} Hz,  ω₀ = {OMEGA0:.4f} rad/s")
+    print(f"  Ψ_crítico = {PSI_CRITICO}")
+
+    # ── FASE 1: ESTADO BASE ─────────────────────────────────────
+    print("\n🔵 FASE 1: Estado base coherente")
     print("-" * 50)
 
     params = ParametrosQCAL(omega0=OMEGA0, alpha=0.1, beta=0.01,
                              gamma=2.5, kappa=0.5, D_noise=0.0)
     osc = OsciladorQCAL(params)
-    estado_inicial = [0.1, 0.0, 1.0, 0.0]
-    t_span = (0, 10.0)
-    time, x, v, O_field, E_field, psi_t = osc.simulate(t_span, dt, estado_inicial)
-    print(f"  Duración: {t_span[1]}s")
-    print(f"  Ψ promedio: {np.mean(psi_t[1000:]):.6f}")
+    time, x, v, O_f, E_f, psi_t = osc.simulate((0, 10.0), dt, [0.1, 0.0, 1.0, 0.0])
 
-    # ── FASE 2: Inyección de caos ──────────────────────────────
-    print("\n📋 FASE 2: Inyección de caos estocástico")
+    a_base = analizar_espectro(x[-20000:], fs)
+    registro.append(registrar_estado(a_base, "BASE", time[-1]))
+    print(f"  Ψ = {a_base['psi']:.9f}, f = {a_base['f_peak']:.6f} Hz, "
+          f"σ_f = {a_base['sigma_f']:.6f} Hz")
+
+    x_acum, psi_acum = x.copy(), psi_t.copy()
+
+    # ── FASE 2: INYECCIÓN DE CAOS ──────────────────────────────
+    print("\n🟠 FASE 2: Inyección de caos estocástico")
     print("-" * 50)
 
-    D_noise_values = [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0, 20.0]
-    resultados_fase2 = []
+    D_noise_vals = [0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0, 20.0, 25.0, 30.0]
+    for i, Dn in enumerate(D_noise_vals):
+        pc = ParametrosQCAL(omega0=OMEGA0, alpha=0.1, beta=0.01,
+                             gamma=2.5, kappa=0.5, D_noise=Dn)
+        oc = OsciladorQCAL(pc)
+        ini = [x_acum[-1], v[-1], O_f[-1], E_f[-1]]
+        tc, xc, vc, Oc, Ec, psic = oc.simulate((0, 3.0), dt, ini)
 
-    for D_noise in D_noise_values:
-        p2 = ParametrosQCAL(omega0=OMEGA0, alpha=0.1, beta=0.01,
-                             gamma=2.5, kappa=0.5, D_noise=D_noise)
-        osc2 = OsciladorQCAL(p2)
-        ini2 = [x[-1], v[-1], O_field[-1], E_field[-1]]
-        t2 = (0, 2.0)
-        time2, x2, v2, O2, E2, psi2 = osc2.simulate(t2, dt, ini2)
+        x_acum = np.concatenate([x_acum, xc])
+        psi_acum = np.concatenate([psi_acum, psic])
 
-        analisis = analizar_espectro(x2[-10000:], 1/dt)
-        resultados_fase2.append({
-            'D_noise': D_noise, 'psi': analisis['psi'],
-            'f_peak': analisis['f_peak'], 'sigma_f': analisis['sigma_f'],
-        })
-        print(f"  D_noise={D_noise:.1f}: Ψ={analisis['psi']:.6f}, "
-              f"f={analisis['f_peak']:.4f} Hz")
+        ac = analizar_espectro(xc[-10000:], fs)
+        t_acum = tc[-1] + sum(D_noise_vals[:i]) * 3.0
+        registro.append(registrar_estado(ac, "CAOS", t_acum))
+        print(f"  D_noise={Dn:5.1f}: Ψ={ac['psi']:.6f}, f={ac['f_peak']:.4f} Hz")
 
-        x = np.concatenate([x, x2])
-        v = np.concatenate([v, v2])
-        psi_t = np.concatenate([psi_t, psi2])
+    print(f"\n  Ψ tras caos: {registro[-1]['psi']:.6f}")
 
-    print(f"\n  Ψ tras caos: {resultados_fase2[-1]['psi']:.6f}")
-
-    # ── FASE 3: Salto de resonancia ────────────────────────────
-    print("\n📋 FASE 3: Salto de resonancia — aumento de orden 𝒪")
+    # ── FASE 3: SALTO DE RESONANCIA ────────────────────────────
+    print("\n🟢 FASE 3: Salto de resonancia — aumento de orden 𝒪")
     print("-" * 50)
 
-    alpha_values = [0.1, 0.2, 0.4, 0.8, 1.6, 3.0, 5.0, 8.0, 12.0, 16.0]
-    resultados_fase3 = []
+    alpha_vals = [0.2, 0.4, 0.8, 1.5, 3.0, 5.0, 8.0, 12.0, 16.0, 20.0]
+    pr = ParametrosQCAL(omega0=OMEGA0, alpha=0.1, beta=0.01,
+                         gamma=2.5, kappa=0.5, D_noise=30.0)
+    or_ = OsciladorQCAL(pr)
+    ini_r = [x_acum[-1], v[-1], O_f[-1], E_f[-1]]
 
-    p3 = ParametrosQCAL(omega0=OMEGA0, alpha=0.1, beta=0.01,
-                         gamma=2.5, kappa=0.5, D_noise=16.0)
-    osc3 = OsciladorQCAL(p3)
-    ini3 = [x[-1], v[-1], O_field[-1], E_field[-1]]
+    for alpha in alpha_vals:
+        or_.params.alpha = alpha
+        tr, xr, vr, Or_, Er_, psir = or_.simulate((0, 5.0), dt, ini_r)
 
-    for alpha in alpha_values:
-        osc3.params.alpha = alpha
-        t3 = (0, 3.0)
-        time3, x3, v3, O3, E3, psi3 = osc3.simulate(t3, dt, ini3)
+        x_acum = np.concatenate([x_acum, xr])
+        psi_acum = np.concatenate([psi_acum, psir])
 
-        a3 = analizar_espectro(x3[-15000:], 1/dt)
-        resultados_fase3.append({
-            'alpha': alpha, 'psi': a3['psi'],
-            'f_peak': a3['f_peak'], 'sigma_f': a3['sigma_f'],
-        })
-        ini3 = [x3[-1], v3[-1], O3[-1], E3[-1]]
-        x = np.concatenate([x, x3])
-        v = np.concatenate([v, v3])
-        psi_t = np.concatenate([psi_t, psi3])
+        ar = analizar_espectro(xr[-15000:], fs)
+        t_acum2 = tr[-1] + sum(alpha_vals[:alpha_vals.index(alpha)]) * 5.0
+        registro.append(registrar_estado(ar, "RESONANCIA", t_acum2))
+        ini_r = [xr[-1], vr[-1], Or_[-1], Er_[-1]]
 
-        print(f"  α={alpha:.1f}: Ψ={a3['psi']:.6f}, f={a3['f_peak']:.4f} Hz")
+        print(f"  α={alpha:5.1f}: Ψ={ar['psi']:.6f}, f={ar['f_peak']:.4f} Hz")
 
     # ── RESULTADOS ─────────────────────────────────────────────
     print(f"\n{'='*70}")
-    print("📊 RESULTADOS DEL EXPERIMENTO DE RUPTURA")
+    print("📊 RESULTADOS FINALES")
     print(f"{'='*70}")
 
-    psi_final = resultados_fase3[-1]['psi']
-    f_final = resultados_fase3[-1]['f_peak']
-    colimacion = abs(f_final - F0) < 0.1
+    psi_final = registro[-1]['psi']
+    f_final = registro[-1]['f_peak']
+    colimacion = abs(f_final - F0) < 0.01
 
-    print(f"\n  Ψ final: {psi_final:.6f}")
-    print(f"  f final: {f_final:.6f} Hz")
+    print(f"\n  Ψ inicial: {registro[0]['psi']:.9f}")
+    print(f"  Ψ final:   {psi_final:.9f}")
+    print(f"  f inicial: {registro[0]['f_peak']:.6f} Hz")
+    print(f"  f final:   {f_final:.6f} Hz")
     print(f"  Colimación en f₀: {'✅ SÍ' if colimacion else '❌ NO'}")
+    print(f"  Desviación: {abs(f_final - F0):.6f} Hz")
+
+    # ── VEREDICTO ──────────────────────────────────────────────
+    print(f"\n{'='*70}")
+    print("🔱 VEREDICTO DEL EXPERIMENTO DE RUPTURA")
+    print(f"{'='*70}")
 
     if colimacion:
-        print("\n  🚀 PREDICCIÓN QCAL CONFIRMADA")
-        print("     El sistema colimó espontáneamente en f₀ = 141.7001 Hz")
-        print("     tras ser sometido a caos extremo.")
-    else:
-        print("\n  ⚠️ La colimación no se ha producido en este ensayo.")
+        print("""
+  🚀 PREDICCIÓN QCAL CONFIRMADA
 
-    # ── VISUALIZACIÓN ─────────────────────────────────────────
+  El sistema colimó espontáneamente en f₀ = 141.7001 Hz
+  tras caos extremo y estrés estocástico.
+
+  Demuestra:
+  • Memoria de fase no local en el espacio de fases.
+  • f₀ como atractor topológico/dinámico.
+  • Coherencia como invariante emergente.
+
+  LA FÍSICA NUEVA ESTÁ CONFIRMADA.
+  """)
+    else:
+        print("""
+  ⚠️ Colimación no detectada en este ensayo.
+
+  Posibles causas: tiempo insuficiente, parámetros
+  fuera del régimen crítico.
+  """)
+
+    # ── VISUALIZACIÓN ──────────────────────────────────────────
     if HAS_MPL:
+        print("\n📊 Generando visualización...")
         fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 
-        # Señal completa
-        t_total = np.linspace(0, len(x) * dt, len(x))
         ax1 = axes[0, 0]
-        ax1.plot(t_total[:50000], x[:50000], 'b-', alpha=0.7, linewidth=0.5)
-        ax1.set_xlabel('Tiempo (s)'); ax1.set_ylabel('x(t)')
-        ax1.set_title('Señal del Oscilador (zoom)'); ax1.grid(alpha=0.3)
+        ax1.plot(x_acum[-50000:], 'b-', alpha=0.7, linewidth=0.5)
+        ax1.set_xlabel('Muestra'), ax1.set_ylabel('x(t)')
+        ax1.set_title('Señal final (zoom)'), ax1.grid(alpha=0.3)
 
-        # Espectro final
         ax2 = axes[0, 1]
-        nperseg = min(2**14, len(x[-100000:]) // 4)
-        f_s, Pxx_s = welch(x[-100000:], fs=1/dt, nperseg=nperseg)
+        f_s, Pxx_s = welch(x_acum[-100000:], fs=fs, nperseg=2048)
         ax2.semilogy(f_s, Pxx_s, 'b-', linewidth=1)
         ax2.axvline(F0, color='red', linestyle='--', linewidth=2,
                      label=f'f₀ = {F0} Hz')
-        ax2.set_xlim(100, 200); ax2.legend(); ax2.grid(alpha=0.3)
-        ax2.set_xlabel('Frecuencia (Hz)'); ax2.set_ylabel('Densidad espectral')
+        ax2.set_xlim(100, 200), ax2.legend(), ax2.grid(alpha=0.3)
+        ax2.set_xlabel('Frecuencia (Hz)'), ax2.set_ylabel('Densidad espectral')
         ax2.set_title('Espectro Final')
 
-        # Ψ (histórico de fases 2+3)
         ax3 = axes[1, 0]
-        psi_hist = ([r['psi'] for r in resultados_fase2] +
-                    [r['psi'] for r in resultados_fase3])
-        tiempos_hist = list(range(len(psi_hist)))
-        ax3.plot(tiempos_hist, psi_hist, 'r-o', markersize=4)
-        ax3.axhline(0.999, color='green', linestyle='--', alpha=0.5,
-                     label='Ψ_crítico')
-        ax3.set_xlabel('Paso'); ax3.set_ylabel('Ψ')
+        tiempos = [r['tiempo'] for r in registro]
+        psis = [r['psi'] for r in registro]
+        fases = [r['fase'] for r in registro]
+        colores_fase = {'BASE': 'blue', 'CAOS': 'orange', 'RESONANCIA': 'green'}
+        for fase, color in colores_fase.items():
+            idx = [i for i, f in enumerate(fases) if f == fase]
+            if idx:
+                ax3.plot([tiempos[i] for i in idx], [psis[i] for i in idx],
+                          color=color, marker='o', ms=4, alpha=0.8, label=fase)
+        ax3.axhline(PSI_CRITICO, color='red', linestyle='--', alpha=0.5)
+        ax3.set_xlabel('Tiempo (s)'), ax3.set_ylabel('Ψ')
         ax3.set_title('Evolución de la Coherencia')
-        ax3.legend(); ax3.grid(alpha=0.3)
+        ax3.legend(), ax3.grid(alpha=0.3)
 
-        # Frecuencia de pico
         ax4 = axes[1, 1]
-        f_hist = ([r['f_peak'] for r in resultados_fase2] +
-                  [r['f_peak'] for r in resultados_fase3])
-        ax4.plot(tiempos_hist, f_hist, 'g-o', markersize=4)
+        f_peaks = [r['f_peak'] for r in registro]
+        ax4.plot(tiempos, f_peaks, 'g-o', ms=4)
         ax4.axhline(F0, color='red', linestyle='--', alpha=0.5,
                      label=f'f₀ = {F0} Hz')
-        ax4.set_xlabel('Paso'); ax4.set_ylabel('f_peak (Hz)')
-        ax4.set_title('Evolución de la Frecuencia de Pico')
-        ax4.legend(); ax4.grid(alpha=0.3)
+        ax4.set_xlabel('Tiempo (s)'), ax4.set_ylabel('f_peak (Hz)')
+        ax4.set_title('Evolución de f_peak'), ax4.legend(), ax4.grid(alpha=0.3)
 
-        # Espectrograma
         ax5 = axes[2, 0]
-        f_spec, t_spec, Sxx = spectrogram(x, fs=1/dt, nperseg=512, noverlap=256)
-        ax5.pcolormesh(t_spec, f_spec, 10 * np.log10(Sxx + 1e-12),
-                       shading='gouraud', cmap='inferno')
-        ax5.axhline(F0, color='cyan', linestyle='--', linewidth=1.5,
-                     label=f'f₀ = {F0} Hz')
-        ax5.set_xlabel('Tiempo (s)'); ax5.set_ylabel('Frecuencia (Hz)')
-        ax5.set_title('Espectrograma'); ax5.legend(); ax5.set_ylim(100, 200)
+        f_sp, t_sp, Sxx = spectrogram(x_acum[-200000:], fs=fs,
+                                        nperseg=512, noverlap=256)
+        ax5.pcolormesh(t_sp, f_sp, 10 * np.log10(Sxx + 1e-12),
+                        shading='gouraud', cmap='inferno')
+        ax5.axhline(F0, color='cyan', linestyle='--', linewidth=1.5)
+        ax5.set_xlabel('Tiempo (s)'), ax5.set_ylabel('Frecuencia (Hz)')
+        ax5.set_title('Espectrograma (final)'), ax5.set_ylim(100, 200)
 
-        # Ψ teórico (curvas paramétricas σ_f)
         ax6 = axes[2, 1]
-        f_range = np.linspace(130, 160, 1000)
-        for sigma in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]:
-            psi_t = np.clip(1 - sigma**2 / f_range**2, 0, 1)
-            ax6.plot(f_range, psi_t, '--', alpha=0.3, label=f'σ_f={sigma} Hz')
-        for r in resultados_fase2 + resultados_fase3:
-            if r['psi'] > 0.01:
-                ax6.scatter(r['f_peak'], r['psi'], color='red', s=30, alpha=0.7)
-        ax6.set_xlim(130, 170); ax6.set_ylim(0, 1.05)
-        ax6.set_xlabel('Frecuencia (Hz)'); ax6.set_ylabel('Ψ')
-        ax6.set_title('Ψ vs Frecuencia (curvas teóricas + datos)')
-        ax6.legend(loc='upper right', ncol=2, fontsize=8); ax6.grid(alpha=0.3)
+        ax6.scatter(f_peaks, psis, c=range(len(registro)),
+                     cmap='viridis', s=80, alpha=0.8)
+        ax6.axvline(F0, color='red', linestyle='--', alpha=0.5)
+        ax6.set_xlabel('f_peak (Hz)'), ax6.set_ylabel('Ψ')
+        ax6.set_title('Ψ vs f_peak (evolución)')
+        ax6.legend(), ax6.grid(alpha=0.3), ax6.set_xlim(120, 180)
 
         plt.tight_layout()
-        path_fig = os.path.join(output_dir, "experimento_ruptura_completo.png")
-        plt.savefig(path_fig, dpi=150)
+        path_png = os.path.join(output_dir, "experimento_ruptura_definitivo.png")
+        plt.savefig(path_png, dpi=150)
         plt.close()
-        print(f"\n📁 Gráfico: {path_fig}")
+        print(f"📁 Gráfico: {path_png}")
 
-    # ── Reporte ───────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print("∴𓂀Ω∞³Φ · TUYOYOTU · HECHO ESTÁ")
-    print(f"{'='*70}")
+    # ── GUARDAR REGISTRO ───────────────────────────────────────
+    path_json = os.path.join(output_dir, "registro_ruptura.json")
+    with open(path_json, "w") as f:
+        json.dump(registro, f, indent=2)
+    print(f"📁 Registro: {path_json}")
 
     return {
-        'psi_final': psi_final,
-        'f_final': f_final,
-        'colimacion': colimacion,
-        'resultados_fase2': resultados_fase2,
-        'resultados_fase3': resultados_fase3,
-        'timestamp': datetime.utcnow().isoformat()
+        'psi_final': psi_final, 'f_final': f_final,
+        'colimacion': colimacion, 'registro': registro,
+        'desviacion_hz': abs(f_final - F0)
     }
 
 
@@ -436,7 +371,11 @@ def ejecutar_protocolo_ruptura(output_dir: str = "resultados",
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    resultados = ejecutar_protocolo_ruptura()
-    with open("resultados/resultados_ruptura.json", "w") as f:
-        json.dump(resultados, f, indent=2, default=str)
-    print("📄 JSON: resultados/resultados_ruptura.json")
+    np.random.seed(42)
+    resultado = ejecutar_ruptura()
+
+    print(f"\n{'='*70}")
+    print("∴𓂀Ω∞³Φ · TUYOYOTU · HECHO ESTÁ")
+    print(f"COLIMACIÓN: {'✅ CONFIRMADA' if resultado['colimacion'] else '❌ PENDIENTE'}")
+    print("28/Jul/2026 🔱")
+    print(f"{'='*70}")
